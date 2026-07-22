@@ -93,20 +93,63 @@ export class GpuSidebarProvider implements vscode.TreeDataProvider<SidebarItem>,
   }
 
   // ── Pod Manager (Kubernetes) ──────────────────────────────────
+
+  /** Aggregate GPU usage per pod id, from the GPU processes attributed to pods. */
+  private podGpuUsage(): Map<string, { vram: number; count: number; gpus: number[] }> {
+    const byPod = new Map<string, { vram: number; count: number; gpus: number[] }>();
+    for (const p of this.gpuProcesses) {
+      if (!p.containerId.startsWith("k8s:")) continue;
+      let e = byPod.get(p.containerId);
+      if (!e) {
+        e = { vram: 0, count: 0, gpus: [] };
+        byPod.set(p.containerId, e);
+      }
+      e.vram += p.memMib;
+      e.count++;
+      if (p.gpuIndex >= 0 && !e.gpus.includes(p.gpuIndex)) e.gpus.push(p.gpuIndex);
+    }
+    for (const e of byPod.values()) e.gpus.sort((a, b) => a - b);
+    return byPod;
+  }
+
   private getPodManagerChildren(): SidebarItem[] {
     const pods = this.containers.filter((c) => c.source === "k8s");
-    const byNs = new Map<string, number>();
-    for (const p of pods) byNs.set(p.namespace || "default", (byNs.get(p.namespace || "default") || 0) + 1);
+    const gpuByPod = this.podGpuUsage();
+    const byNs = new Map<string, { count: number; gpuPods: number; vram: number }>();
+    for (const p of pods) {
+      const ns = p.namespace || "default";
+      let e = byNs.get(ns);
+      if (!e) {
+        e = { count: 0, gpuPods: 0, vram: 0 };
+        byNs.set(ns, e);
+      }
+      e.count++;
+      const g = gpuByPod.get(p.id);
+      if (g) {
+        e.gpuPods++;
+        e.vram += g.vram;
+      }
+    }
+    // GPU-bearing namespaces float to the top, then alphabetical.
     return [...byNs.entries()]
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([ns, count]) => new PodNamespaceItem(ns, count));
+      .sort((a, b) => (b[1].vram - a[1].vram) || a[0].localeCompare(b[0]))
+      .map(([ns, e]) => new PodNamespaceItem(ns, e.count, e.gpuPods, e.vram));
   }
 
   private getPodNamespaceChildren(el: PodNamespaceItem): SidebarItem[] {
+    const gpuByPod = this.podGpuUsage();
     return this.containers
       .filter((c) => c.source === "k8s" && (c.namespace || "default") === el.namespace)
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((c) => new PodItem(c, this.containerStats.get(c.id)));
+      // GPU pods first (heaviest VRAM on top), then the rest alphabetically.
+      .sort((a, b) => {
+        const av = gpuByPod.get(a.id)?.vram || 0;
+        const bv = gpuByPod.get(b.id)?.vram || 0;
+        return (bv - av) || a.name.localeCompare(b.name);
+      })
+      .map((c) => {
+        const g = gpuByPod.get(c.id);
+        return new PodItem(c, this.containerStats.get(c.id), g?.vram || 0, g?.count || 0, g?.gpus || []);
+      });
   }
 
   private getPodChildren(el: PodItem): SidebarItem[] {

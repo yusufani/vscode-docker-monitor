@@ -24,6 +24,9 @@ export interface HostProcDetail {
   cmdline: string;
   cwd: string;
   startTime: number; // epoch ms, 0 if unknown
+  /** Parent process cmdline — used to recover the real command when cmdline is a
+   *  prctl/setproctitle-renamed title (e.g. vLLM's "VLLM::EngineCore"). "" if unknown. */
+  parentCmdline: string;
 }
 
 const CACHE_TTL = 25_000; // matches the docker stats / pid-map cache cadence
@@ -84,6 +87,10 @@ function buildScript(pids: number[]): string {
     `  echo "@@CMD $(tr '\\0' ' ' < /hostproc/$p/cmdline 2>/dev/null)"`,
     `  echo "@@CWD $(readlink /hostproc/$p/cwd 2>/dev/null)"`,
     `  echo "@@STAT $(cat /hostproc/$p/stat 2>/dev/null)"`,
+    // Parent cmdline — lets us recover the real command for setproctitle-renamed
+    // processes (e.g. vLLM engine cores whose own cmdline is just "VLLM::EngineCore").
+    `  pp=$(awk '/^PPid:/{print $2; exit}' /hostproc/$p/status 2>/dev/null)`,
+    `  echo "@@PCMD $(tr '\\0' ' ' < /hostproc/$pp/cmdline 2>/dev/null)"`,
     `done`,
     `echo "@@BTIME $(awk '/^btime/{print $2; exit}' /hostproc/stat 2>/dev/null)"`,
   ].join("\n");
@@ -127,11 +134,11 @@ export async function readHostProcViaDocker(
     const { stdout } = await execCommand(cmd, { timeout: 15000 });
 
     // Collect raw records first; startTime needs btime which arrives on the last line.
-    interface Raw { pid: number; cgroup: string; uid: number; username: string; rssMib: number; cmdline: string; cwd: string; stat: string; }
+    interface Raw { pid: number; cgroup: string; uid: number; username: string; rssMib: number; cmdline: string; cwd: string; stat: string; parentCmdline: string; }
     const raws: Raw[] = [];
     let btimeSec = 0;
     let cur: Raw | null = null;
-    const blank = (pid: number): Raw => ({ pid, cgroup: "", uid: -1, username: "", rssMib: 0, cmdline: "", cwd: "", stat: "" });
+    const blank = (pid: number): Raw => ({ pid, cgroup: "", uid: -1, username: "", rssMib: 0, cmdline: "", cwd: "", stat: "", parentCmdline: "" });
 
     for (const line of stdout.split("\n")) {
       if (line.startsWith("@@PID ")) {
@@ -146,6 +153,7 @@ export async function readHostProcViaDocker(
       else if (line.startsWith("@@CMD ")) cur.cmdline = line.slice(6).trim();
       else if (line.startsWith("@@CWD ")) cur.cwd = line.slice(6).trim();
       else if (line.startsWith("@@STAT ")) cur.stat = line.slice(7);
+      else if (line.startsWith("@@PCMD ")) cur.parentCmdline = line.slice(7).trim();
       else if (line.startsWith("@@BTIME ")) btimeSec = parseInt(line.slice(8).trim()) || 0;
     }
     if (cur) raws.push(cur);
@@ -160,6 +168,7 @@ export async function readHostProcViaDocker(
         cmdline: r.cmdline,
         cwd: r.cwd,
         startTime: parseStartTime(r.stat, btimeSec),
+        parentCmdline: r.parentCmdline,
       });
     }
   } catch (e) {

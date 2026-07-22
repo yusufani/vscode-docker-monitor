@@ -133,7 +133,12 @@ function renderContainerSummary(data: GpuData, containers: ContainerFullInfo[]):
     const tv = Object.values(gm).reduce((s, v) => s + v, 0);
     const cs = cnameToId[cn] ? containerStats.get(cnameToId[cn]) : undefined;
     const cid = cnameToId[cn] || "";
-    let cols = `<td class="name">${esc(cn)}</td>`;
+    const lbl = podLabel(cn);
+    const badge = lbl.kind === "k8s" ? "☸ " : lbl.kind === "docker" ? "🐳 " : "";
+    const nameCell = lbl.kind === "k8s"
+      ? `${badge}${esc(lbl.short)} <span class="ns-tag">${esc(lbl.ns)}</span>`
+      : `${badge}${esc(lbl.short)}`;
+    let cols = `<td class="name" title="${esc(cn)}">${nameCell}</td>`;
     for (const gi of gpuIndices) cols += `<td class="${memClass(gm[gi] || 0)}">${gm[gi] ? fmtMem(gm[gi]) : "\u2014"}</td>`;
     cols += `<td class="${memClass(tv)}"><b>${tv > 0 ? fmtMem(tv) : "\u2014"}</b></td>`;
     cols += `<td>${cs ? cs.cpuPercent.toFixed(1) + "%" : "\u2014"}</td>`;
@@ -157,6 +162,14 @@ function renderContainerSummary(data: GpuData, containers: ContainerFullInfo[]):
   return `<table><tr>${headers}</tr>${rows}</table>`;
 }
 
+/** Split a k8s "ns/pod" container name into a namespace tag + short pod label. */
+function podLabel(containerName: string): { kind: "k8s" | "docker" | "host"; ns: string; short: string } {
+  if (containerName === "host" || containerName === "(host)") return { kind: "host", ns: "", short: "(host)" };
+  const slash = containerName.indexOf("/");
+  if (slash > 0) return { kind: "k8s", ns: containerName.slice(0, slash), short: containerName.slice(slash + 1) };
+  return { kind: "docker", ns: "", short: containerName };
+}
+
 function renderProcessGroups(data: GpuData): string {
   const { processes, containerStats } = data;
   const cnameToId: Record<string, string> = {};
@@ -168,12 +181,14 @@ function renderProcessGroups(data: GpuData): string {
     if (p.containerId) cnameToId[cn] = p.containerId;
   }
 
+  // Sort groups by total VRAM (heaviest first).
   const sortedGroups = Object.entries(groups).sort(
     (a, b) => b[1].reduce((s, p) => s + p.memMib, 0) - a[1].reduce((s, p) => s + p.memMib, 0),
   );
 
   let html = "";
   for (const [cn, procs] of sortedGroups) {
+    procs.sort((a, b) => b.memMib - a.memMib); // heaviest process first within the group
     const tv = procs.reduce((s, p) => s + p.memMib, 0);
     const tr = procs.reduce((s, p) => s + p.ramMib, 0);
     const gu = [...new Set(procs.map((p) => p.gpuIndex))].sort().join(",");
@@ -182,6 +197,9 @@ function renderProcessGroups(data: GpuData): string {
     const cid = cnameToId[cn] || "";
     const cs = cid ? containerStats.get(cid) : undefined;
     const cpuStr = cs ? ` \u00B7 CPU ${cs.cpuPercent.toFixed(1)}%` : "";
+    const lbl = podLabel(cn);
+    const badge = lbl.kind === "k8s" ? "\u2638 " : lbl.kind === "docker" ? "\uD83D\uDC33 " : "";
+    const nsTag = lbl.kind === "k8s" ? `<span class="ns-tag" title="Kubernetes namespace">${esc(lbl.ns)}</span>` : "";
     let act = "";
     if (cn !== "(host)" && cid) {
       act = `<button class="btn btn-warn" onclick="restartContainer('${cid}','${esc(cn)}')">Restart</button>`;
@@ -189,7 +207,7 @@ function renderProcessGroups(data: GpuData): string {
       act += `<button class="btn btn-danger" onclick="killContainerAction('${cid}','${esc(cn)}')">Kill</button>`;
     }
     const groupText = `${cn} | ${procs.length} procs | VRAM ${fmtMem(tv)} | RAM ${fmtMem(tr)} | GPU ${gu}${guSum > 0 ? ` | SM ${guSum}%` : ""}${cs ? ` | CPU ${cs.cpuPercent.toFixed(1)}%` : ""}`;
-    html += `<div class="group-header"><span class="group-name">${esc(cn)}</span><span class="group-meta">${procs.length} procs \u00B7 VRAM ${fmtMem(tv)} \u00B7 RAM ${fmtMem(tr)} \u00B7 GPU ${gu}${guStr}${cpuStr}</span><button class="btn-copy" data-copy="${esc(groupText)}" title="Copy">copy</button>${act}</div>`;
+    html += `<div class="group-header"><span class="group-name" title="${esc(cn)}">${badge}${esc(lbl.short)}</span>${nsTag}<span class="group-meta">${procs.length} procs \u00B7 VRAM ${fmtMem(tv)} \u00B7 RAM ${fmtMem(tr)} \u00B7 GPU ${gu}${guStr}${cpuStr}</span><button class="btn-copy" data-copy="${esc(groupText)}" title="Copy">copy</button>${act}</div>`;
     for (let i = 0; i < procs.length; i++) {
       const p = procs[i];
       const last = i === procs.length - 1;
@@ -203,9 +221,15 @@ function renderProcessGroups(data: GpuData): string {
       const startStr = fmtStartDate(p.startTime);
       const timeInfo = upStr ? `<span class="uptime" title="Started: ${startStr}">\u23F1 ${upStr}</span>` : "";
       const smCls = p.gpuUtil > 50 ? "red" : p.gpuUtil > 20 ? "yellow" : "dim";
-      const rowText = `PID ${p.pid} | VRAM ${fmtMem(p.memMib)} | RAM ${fmtMem(p.ramMib)} | G${p.gpuIndex} | SM ${p.gpuUtil}% | ${p.processName} | ${p.username}${cwdShort ? ` | ${cw}` : ""}${upStr ? ` | uptime: ${upStr}` : ""}`;
+      const where = lbl.kind === "host" ? "host" : (lbl.kind === "k8s" ? `pod ${cn}` : `container ${cn}`);
+      // Only pod-backed processes carry a marker, so they stand out in a mixed list.
+      const procMark = lbl.kind === "k8s"
+        ? `<span class="pod-mark" title="Kubernetes pod process">☸</span>`
+        : "";
+      const pnameTitle = `${p.processName}\n${where}\nPID ${p.pid} \u00B7 ${p.username}${startStr ? ` \u00B7 started ${startStr}` : ""}`;
+      const rowText = `${where} | PID ${p.pid} | VRAM ${fmtMem(p.memMib)} | RAM ${fmtMem(p.ramMib)} | G${p.gpuIndex} | SM ${p.gpuUtil}% | ${p.processName} | ${p.username}${cwdShort ? ` | ${cw}` : ""}${upStr ? ` | uptime: ${upStr}` : ""}${cmd ? ` | CMD: ${cmd}` : ""}`;
       const detailText = `${cw}$ ${cmd}`;
-      html += `<div class="proc-row" data-name="${esc(p.processName)}" data-user="${esc(p.username)}" data-container="${esc(cn)}"><span class="tree">${br}</span><span class="pid">${p.pid}</span><span class="mem ${memClass(p.memMib)}">${fmtMem(p.memMib)}</span><span class="ram">${fmtMem(p.ramMib)}</span><span class="gpu-idx">G${p.gpuIndex}</span><span class="gpu-util ${smCls}" title="Per-process GPU SM utilization (nvidia-smi pmon)">${p.gpuUtil}%</span><span class="pname">${esc(p.processName)}</span>${cwdTag}${timeInfo}<span class="user-tag">${esc(p.username)}</span><button class="btn-copy" data-copy="${esc(rowText)}" title="Copy">copy</button><button class="btn-kill" onclick="killProc(${p.pid},'${esc(p.processName)}',${p.memMib})">\u00D7</button></div>`;
+      html += `<div class="proc-row" data-name="${esc(p.processName)}" data-user="${esc(p.username)}" data-container="${esc(cn)}"><span class="tree">${br}</span><span class="pid">${p.pid}</span><span class="mem ${memClass(p.memMib)}">${fmtMem(p.memMib)}</span><span class="ram">${fmtMem(p.ramMib)}</span><span class="gpu-idx">G${p.gpuIndex}</span><span class="gpu-util ${smCls}" title="Per-process GPU SM utilization (nvidia-smi pmon)">${p.gpuUtil}%</span>${procMark}<span class="pname" title="${esc(pnameTitle)}">${esc(p.processName)}</span>${cwdTag}${timeInfo}<span class="user-tag">${esc(p.username)}</span><button class="btn-copy" data-copy="${esc(rowText)}" title="Copy">copy</button><button class="btn-kill" onclick="killProc(${p.pid},'${esc(p.processName)}',${p.memMib})">\u00D7</button></div>`;
       html += `<div class="proc-detail" data-name="${esc(p.processName)}" data-user="${esc(p.username)}" data-container="${esc(cn)}"><span class="tree dim">${co}</span><span class="dim">\u2514 ${esc(cw)}$ ${esc(cmd)}</span><button class="btn-copy" data-copy="${esc(detailText)}" title="Copy">copy</button></div>`;
     }
   }
@@ -298,6 +322,8 @@ td.actions{text-align:right;white-space:nowrap}
 .group-header{background:var(--card-bg);border:1px solid var(--border);border-radius:4px;padding:6px 10px;margin:8px 0 2px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .group-name{color:var(--cyan);font-weight:bold}
 .group-meta{color:var(--dim);font-size:12px}
+.ns-tag{color:var(--yellow);font-size:11px;background:var(--card-bg);padding:1px 6px;border-radius:3px;border:1px solid var(--border);white-space:nowrap}
+.pod-mark{color:#4a9eff;font-size:12px;flex-shrink:0;cursor:default}
 .proc-row{display:flex;align-items:center;gap:8px;padding:2px 0 2px 16px;font-family:monospace}
 .proc-detail{padding:0 0 4px 16px;font-family:monospace;font-size:11px;word-break:break-all;white-space:normal}
 .tree{color:var(--dim);width:20px;flex-shrink:0}

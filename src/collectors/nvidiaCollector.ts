@@ -7,6 +7,7 @@ import { detectPlatform } from "../utils/platform";
 import { log, logDebug } from "../utils/logger";
 import { resolveContainerFromPid, extractContainerShortId } from "./containerResolver";
 import { readHostProcViaDocker } from "../utils/hostProcHelper";
+import { deriveProcessName, looksRenamed, isShimOrInit } from "../utils/procName";
 
 function readProcFile(filePath: string): string {
   try {
@@ -378,11 +379,14 @@ export class NvidiaCollector implements IGpuCollector {
           const container = resolveContainerFromPid(r.pid, containerNameMap, podIndex);
           const detail = getProcessDetailFromProc(r.pid);
           const username = detail.uid >= 0 ? await resolveUidAsync(detail.uid) : "?";
+          const nvName = r.pname.split("/").pop() || r.pname;
+          // Prefer a name derived from the (parent-recovered) cmdline; fall back to nvidia's.
+          const processName = deriveProcessName(detail.cmdline, nvName);
           return {
             pid: r.pid,
             gpuIndex: r.gpuIdx,
             memMib: r.mem,
-            processName: r.pname.split("/").pop() || r.pname,
+            processName,
             containerId: container.id,
             containerName: container.name,
             cmdline: detail.cmdline || r.pname,
@@ -436,10 +440,15 @@ export class NvidiaCollector implements IGpuCollector {
           // Use cmdline from host /proc or docker top when nvidia-smi returns [Not Found]
           const nvidiaName = r.pname;
           const isNotFound = !nvidiaName || nvidiaName === "[Not Found]";
-          const realCmdline = hp?.cmdline || topDetail?.cmdline || (isNotFound ? "" : nvidiaName);
-          const processName = isNotFound
-            ? (realCmdline.split(/\s+/)[0]?.split("/").pop() || "unknown")
-            : (nvidiaName.split("/").pop() || nvidiaName);
+          let realCmdline = hp?.cmdline || topDetail?.cmdline || (isNotFound ? "" : nvidiaName);
+          // Recover the real command for setproctitle-renamed processes (e.g. vLLM's
+          // "VLLM::EngineCore") from the parent cmdline captured by the host /proc bridge.
+          if (looksRenamed(realCmdline) && hp?.parentCmdline && !isShimOrInit(hp.parentCmdline)) {
+            realCmdline = `[parent] ${hp.parentCmdline}`;
+          }
+          // Friendly display name derived from the (recovered) cmdline; fall back to nvidia's.
+          const fallbackName = isNotFound ? "unknown" : (nvidiaName.split("/").pop() || nvidiaName);
+          const processName = deriveProcessName(realCmdline, fallbackName);
           processes.push({
             pid: r.pid,
             gpuIndex: r.gpuIdx,
@@ -462,6 +471,9 @@ export class NvidiaCollector implements IGpuCollector {
       log(`nvidia-smi process query failed: ${e}`);
     }
 
+    // Always hand processes back sorted by VRAM (largest first) so every consumer
+    // (webview groups, sidebar, status bar) shows the heaviest allocations on top.
+    processes.sort((a, b) => b.memMib - a.memMib);
     return processes;
   }
 

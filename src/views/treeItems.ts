@@ -300,13 +300,25 @@ export class ProcessItem extends vscode.TreeItem {
     if (uptime) parts.push(uptime);
     const cwdFolder = proc.cwd && proc.cwd !== "?" ? proc.cwd.split("/").filter(Boolean).pop() : "";
     if (cwdFolder) parts.push(`📁 ${cwdFolder}`);
-    this.description = parts.join(" · ");
-    this.iconPath = new vscode.ThemeIcon("symbol-method");
+    // Show the owner inline so "who started it" is visible without hovering.
+    const userTag = proc.username && proc.username !== "?" ? ` · 👤 ${proc.username}` : "";
+    this.description = parts.join(" · ") + userTag;
     this.contextValue = "gpuProcess";
-    const tooltipLines = [proc.processName, ...parts, `User: ${proc.username}`];
+    // Where the process runs: a k8s pod ("ns/pod"), a docker container, or the host.
+    const isK8s = proc.containerId.startsWith("k8s:");
+    // Pod-backed processes get their own icon+color so they stand out from
+    // plain docker/host processes at a glance (matches ContainerItem's k8s blue).
+    this.iconPath = isK8s
+      ? new vscode.ThemeIcon("server-process", new vscode.ThemeColor("terminal.ansiBlue"))
+      : new vscode.ThemeIcon("symbol-method");
+    const where = !proc.containerName || proc.containerName === "host"
+      ? "host"
+      : isK8s ? `Pod: ${proc.containerName}` : `Container: ${proc.containerName}`;
+    const tooltipLines = [proc.processName, where, ...parts, `User: ${proc.username}`];
     const startDate = fmtStartDate(proc.startTime);
     if (startDate) tooltipLines.push(`Started: ${startDate}`);
     if (proc.cwd && proc.cwd !== "?") tooltipLines.push(`CWD: ${proc.cwd}`);
+    if (proc.cmdline && proc.cmdline !== proc.processName) tooltipLines.push(`CMD: ${proc.cmdline}`);
     this.tooltip = tooltipLines.join("\n");
   }
 }
@@ -607,12 +619,20 @@ export class PodNamespaceItem extends vscode.TreeItem {
   constructor(
     public readonly namespace: string,
     podCount: number,
+    /** How many pods in this namespace run GPU processes. */
+    gpuPodCount = 0,
+    /** Total VRAM (MiB) used across this namespace's pods. */
+    gpuVram = 0,
   ) {
     super(namespace, vscode.TreeItemCollapsibleState.Collapsed);
-    this.description = `${podCount} pod${podCount !== 1 ? "s" : ""}`;
+    // Pod rows carry the "chip" icon, so the namespace line just needs the counts.
+    const gpuPart = gpuPodCount > 0 ? ` · ${gpuPodCount} GPU · VRAM ${fmtMem(gpuVram)}` : "";
+    this.description = `${podCount} pod${podCount !== 1 ? "s" : ""}${gpuPart}`;
     this.iconPath = new vscode.ThemeIcon("folder", new vscode.ThemeColor(getUserColor(namespace)));
     this.contextValue = "podNamespace";
-    this.tooltip = `Namespace: ${namespace}\nPods: ${podCount}`;
+    const tip = [`Namespace: ${namespace}`, `Pods: ${podCount}`];
+    if (gpuPodCount > 0) tip.push(`GPU pods: ${gpuPodCount} · VRAM ${fmtMem(gpuVram)}`);
+    this.tooltip = tip.join("\n");
   }
 }
 
@@ -621,7 +641,14 @@ export class PodItem extends vscode.TreeItem {
   constructor(
     public readonly container: ContainerFullInfo,
     stats?: ContainerStats,
+    /** Total VRAM (MiB) used by this pod's GPU processes — 0 when the pod uses no GPU. */
+    gpuVram = 0,
+    /** How many GPU processes this pod owns. */
+    gpuProcCount = 0,
+    /** GPU indices this pod has processes on. */
+    gpuIndices: number[] = [],
   ) {
+    const hasGpu = gpuVram > 0 || gpuProcCount > 0;
     const healthBadge = container.health === "unhealthy" ? " ❌"
       : container.health === "starting" ? " ⏳"
       : "";
@@ -632,21 +659,29 @@ export class PodItem extends vscode.TreeItem {
     );
     const parts: string[] = [];
     if (container.podPhase) parts.push(container.podPhase);
+    if (hasGpu) parts.push(`VRAM ${fmtMem(gpuVram)}`);
     if (stats) {
       parts.push(`CPU ${stats.cpuPercent.toFixed(1)}%`);
       parts.push(`RAM ${fmtMem(stats.memUsedMib)}`);
     }
+    if (hasGpu && gpuIndices.length > 0) parts.push(`GPU ${gpuIndices.join(",")}`);
     if (portList.length > 0) parts.push(`:${portList.join(",")}`);
     if (container.uptime) parts.push(container.uptime);
     this.description = parts.join(" · ");
+    // GPU pods get the "chip" codicon; plain pods keep "package".
+    // Health/phase colors still win over the GPU tint so problems stay visible.
     const phaseColor = container.health === "unhealthy" ? "errorForeground"
       : container.podPhase === "Pending" ? "editorWarning.foreground"
+      : hasGpu ? "terminal.ansiCyan"
       : "terminal.ansiBlue";
-    this.iconPath = new vscode.ThemeIcon("package", new vscode.ThemeColor(phaseColor));
+    this.iconPath = new vscode.ThemeIcon(hasGpu ? "chip" : "package", new vscode.ThemeColor(phaseColor));
     this.contextValue = "k8sPod"; // reuse the pod inline/context menus (restart, stop, logs, exec, describe)
     const tip = [`${container.namespace}/${container.name}`];
     if (container.node) tip.push(`Node: ${container.node}`);
     if (container.controllerKind) tip.push(`Controller: ${container.controllerKind}/${container.controllerName}`);
+    if (hasGpu) {
+      tip.push(`GPU: ${gpuProcCount} process${gpuProcCount !== 1 ? "es" : ""} · VRAM ${fmtMem(gpuVram)}${gpuIndices.length > 0 ? ` · GPU ${gpuIndices.join(", ")}` : ""}`);
+    }
     if (portList.length > 0) tip.push(`Ports: ${portList.join(", ")}`);
     this.tooltip = tip.join("\n");
   }
