@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.17.0](https://github.com/yusufani/devpulse-monitor/compare/v1.16.1...v1.17.0) (2026-07-22)
+
+
+### Features
+
+* resolve real GPU process names and surface pod attribution ([1136ff8](https://github.com/yusufani/devpulse-monitor/commit/1136ff876750fb0d8d55330f22e83676d762eef0))
+
 ## [1.16.1](https://github.com/yusufani/devpulse-monitor/compare/v1.16.0...v1.16.1) (2026-06-27)
 
 
