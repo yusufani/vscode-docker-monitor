@@ -3,7 +3,7 @@
   "displayName": "DevPulse Monitor - CPU RAM GPU Docker & Kubernetes Monitor",
   "description": "Real-time GPU, CPU, RAM monitoring with Docker container and Kubernetes pod resource tracking for VS Code",
   "icon": "images/icon.png",
-  "version": "1.17.0",
+  "version": "1.18.0",
   "publisher": "ANISOFT",
   "license": "SEE LICENSE IN LICENSE",
   "sponsor": {

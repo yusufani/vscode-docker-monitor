@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.18.0](https://github.com/yusufani/devpulse-monitor/compare/v1.17.0...v1.18.0) (2026-07-27)
+
+
+### Features
+
+* explain why Kubernetes pods are missing instead of failing silently ([5fbd84a](https://github.com/yusufani/devpulse-monitor/commit/5fbd84a3b1af9a890c595cee52f1240d304b6afe))
+* explain why Kubernetes pods are missing instead of failing silently ([5a127f2](https://github.com/yusufani/devpulse-monitor/commit/5a127f28ea56bbb7eb143ee3804bdd1b30886147))
+
 ## [1.17.0](https://github.com/yusufani/devpulse-monitor/compare/v1.16.1...v1.17.0) (2026-07-22)
 
 
