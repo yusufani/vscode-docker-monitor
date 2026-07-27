@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.0](https://github.com/yusufani/devpulse-monitor/compare/v1.18.0...v1.19.0) (2026-07-27)
+
+
+### Features
+
+* add a manual "Check Kubernetes" command ([5544d15](https://github.com/yusufani/devpulse-monitor/commit/5544d15302e12f850281ae87ebe6f29f887e04d0))
+* add a manual "Check Kubernetes" command ([a6d091a](https://github.com/yusufani/devpulse-monitor/commit/a6d091a247035c9e80b8654fb5e93021f97306f5))
+
 ## [1.18.0](https://github.com/yusufani/devpulse-monitor/compare/v1.17.0...v1.18.0) (2026-07-27)
 
 
