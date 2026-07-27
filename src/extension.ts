@@ -8,6 +8,7 @@ import { GpuMonitorPanel } from "./views/webview/gpuMonitorPanel";
 import { ProcessItem, ProcessDetailItem, ContainerItem, RamProcessItem, CpuProcessItem, RamManagerItem, CpuManagerItem, DiskManagerItem } from "./views/treeItems";
 import { fmtMem, fmtUptime, fmtStartDate } from "./utils/format";
 import { execCommand } from "./utils/exec";
+import { describeStatus, formatReport, shouldWarnAboutK8s } from "./collectors/kubernetesDiagnostics";
 import { getOutputChannel, log } from "./utils/logger";
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -20,8 +21,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const collectors = await createCollectors();
 
   // ── MonitorService (single refresh loop) ──────────────────────
-  const monitor = new MonitorService(collectors.system, collectors.gpu, collectors.docker);
+  const monitor = new MonitorService(collectors.system, collectors.gpu, collectors.docker, collectors.k8s);
   context.subscriptions.push(monitor);
+
+  // ── Kubernetes diagnostics ────────────────────────────────────
+  registerK8sDiagnostics(context, monitor);
 
   // ── Container Resources table (webview sidebar) ───────────────
   const containerTable = new ContainerTableViewProvider(monitor);
@@ -672,6 +676,80 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   log("Extension activated.");
+}
+
+const K8S_TOAST_DISMISSED = "devpulse.k8sWarningDismissed";
+
+/**
+ * Kubernetes troubleshooting surface: a diagnostics command, a one-time notification,
+ * and the "hide" action behind the sidebar warning row's × button.
+ *
+ * Everything here is gated on shouldWarnAboutK8s(), which requires an actual Kubernetes
+ * footprint on the machine — a Docker-only user never gets a notification or a row.
+ */
+function registerK8sDiagnostics(context: vscode.ExtensionContext, monitor: MonitorService): void {
+  context.subscriptions.push(
+    vscode.commands.registerCommand("gpuMonitor.k8sDiagnostics", async () => {
+      const status = monitor.getK8sStatus();
+      if (!status) {
+        vscode.window.showInformationMessage("DevPulse: Kubernetes monitoring is not wired up in this session.");
+        return;
+      }
+      const channel = getOutputChannel();
+      channel.appendLine("");
+      channel.appendLine(formatReport(status));
+      channel.show(true);
+
+      const hint = describeStatus(status).hint;
+      if (!shouldWarnAboutK8s(status)) return;
+      const pick = await vscode.window.showWarningMessage(
+        `Kubernetes: ${describeStatus(status).message}`,
+        { modal: false, detail: hint },
+        "Open Settings",
+      );
+      if (pick === "Open Settings") {
+        await vscode.commands.executeCommand("workbench.action.openSettings", "dockerMonitor.kubernetes");
+      }
+    }),
+  );
+
+  // Hide for good (× on the sidebar row) — flips the setting, not just this session.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("gpuMonitor.hideK8sWarning", async () => {
+      await vscode.workspace
+        .getConfiguration("dockerMonitor")
+        .update("kubernetes.showWarnings", false, vscode.ConfigurationTarget.Global);
+      vscode.window.showInformationMessage(
+        "DevPulse: Kubernetes warnings hidden. Re-enable with the dockerMonitor.kubernetes.showWarnings setting.",
+      );
+    }),
+  );
+
+  // One-time notification, at most once per install unless dismissed permanently.
+  let notified = false;
+  context.subscriptions.push(
+    monitor.onDataUpdated(async (data) => {
+      if (notified) return;
+      const cfg = vscode.workspace.getConfiguration("dockerMonitor");
+      if (!cfg.get<boolean>("kubernetes.showWarnings", true)) return;
+      if (!shouldWarnAboutK8s(data.k8s)) return;
+      if (context.globalState.get<boolean>(K8S_TOAST_DISMISSED)) return;
+      notified = true;
+
+      const d = describeStatus(data.k8s);
+      log(`[k8s] warning surfaced: ${data.k8s.state} — ${d.message}`);
+      const pick = await vscode.window.showWarningMessage(
+        `DevPulse can't show Kubernetes pods: ${d.message}`,
+        "Show Diagnostics",
+        "Don't Show Again",
+      );
+      if (pick === "Show Diagnostics") {
+        await vscode.commands.executeCommand("gpuMonitor.k8sDiagnostics");
+      } else if (pick === "Don't Show Again") {
+        await context.globalState.update(K8S_TOAST_DISMISSED, true);
+      }
+    }),
+  );
 }
 
 export function deactivate(): void {

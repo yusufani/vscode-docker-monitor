@@ -125,9 +125,44 @@ export interface GpuData {
   error: string;
 }
 
+/** Signals that this machine is set up to talk to a Kubernetes cluster. */
+export interface K8sFootprint {
+  /** Absolute path to kubectl, or null when it is not on the extension host's PATH. */
+  kubectlPath: string | null;
+  /** First readable kubeconfig ($KUBECONFIG entry or ~/.kube/config), or null. */
+  kubeconfig: string | null;
+  /** True when a ServiceAccount token is mounted (extension host runs in a pod). */
+  inCluster: boolean;
+  /** True when any of the above is present — gates every Kubernetes warning in the UI. */
+  any: boolean;
+}
+
+export type K8sState =
+  | "ok" // pods are being listed
+  | "disabled" // turned off via settings
+  | "no-kubectl" // binary not found
+  | "unreachable" // kubectl found but `cluster-info` failed
+  | "list-failed" // cluster reachable but `get pods -A` failed (RBAC?)
+  | "node-scope-empty" // cluster returned pods, 'node' scope filtered them all out
+  | "no-pods"; // cluster reachable and genuinely empty
+
+/** Why Kubernetes pods are (or are not) showing up — surfaced in the sidebar. */
+export interface K8sStatus {
+  state: K8sState;
+  /** Raw stderr/message from the last failing command, for the diagnostics report. */
+  detail?: string;
+  /** Effective scope setting at the time of the probe. */
+  scope: "node" | "cluster";
+  /** Effective namespace allow-list at the time of the probe. */
+  namespaces: string[];
+  footprint: K8sFootprint;
+}
+
 export interface MonitorData {
   system: SystemInfo;
   gpuData: GpuData;
   containers: ContainerFullInfo[];
+  /** Kubernetes health, undefined until the first probe completes. */
+  k8s?: K8sStatus;
 }
 

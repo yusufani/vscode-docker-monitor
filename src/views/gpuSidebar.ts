@@ -1,7 +1,8 @@
 import * as vscode from "vscode";
 import * as os from "os";
 import { MonitorService } from "../services/monitorService";
-import { GpuInfo, GpuProcess, ContainerStats, ContainerFullInfo, SystemInfo } from "../types";
+import { GpuInfo, GpuProcess, ContainerStats, ContainerFullInfo, SystemInfo, K8sStatus } from "../types";
+import { shouldWarnAboutK8s } from "../collectors/kubernetesDiagnostics";
 import { fmtMem, fmtUptime, fmtStartDate } from "../utils/format";
 import {
   SidebarItem,
@@ -35,6 +36,7 @@ import {
   PodPortItem,
   InfoItem,
   OpenMonitorItem,
+  K8sWarningItem,
   ErrorItem,
   tempColor,
   vramColor,
@@ -51,6 +53,7 @@ export class GpuSidebarProvider implements vscode.TreeDataProvider<SidebarItem>,
   private containerStats = new Map<string, ContainerStats>();
   private hasGpu = false;
   private gpuError = "";
+  private k8s: K8sStatus | undefined;
   private gpuHistory: Array<{ timestamp: number; gpus: Array<{ index: number; memUsed: number; memTotal: number; util: number; temp: number }> }> = [];
   private subscription: vscode.Disposable;
 
@@ -63,6 +66,7 @@ export class GpuSidebarProvider implements vscode.TreeDataProvider<SidebarItem>,
       this.containerStats = data.gpuData.containerStats;
       this.hasGpu = data.gpuData.gpus.length > 0;
       this.gpuError = data.gpuData.error || "";
+      this.k8s = data.k8s;
       this.gpuHistory = monitor.getGpuHistory();
       this._onDidChangeTreeData.fire(undefined);
     });
@@ -178,6 +182,9 @@ export class GpuSidebarProvider implements vscode.TreeDataProvider<SidebarItem>,
       if (pods.length > 0) {
         const nsCount = new Set(pods.map((p) => p.namespace || "default")).size;
         items.push(new PodManagerItem(pods.length, nsCount));
+      } else if (cfg.get<boolean>("kubernetes.showWarnings", true) && shouldWarnAboutK8s(this.k8s)) {
+        // Machines with no Kubernetes footprint never reach this branch — see shouldWarnAboutK8s.
+        items.push(new K8sWarningItem(this.k8s));
       }
     }
 
