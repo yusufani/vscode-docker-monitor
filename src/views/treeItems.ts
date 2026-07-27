@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
-import { SystemInfo, GpuInfo, GpuProcess, ContainerStats, ContainerFullInfo, HostProcessInfo, DiskInfo, DirUsage } from "../types";
+import { SystemInfo, GpuInfo, GpuProcess, ContainerStats, ContainerFullInfo, HostProcessInfo, DiskInfo, DirUsage, K8sStatus } from "../types";
+import { describeStatus } from "../collectors/kubernetesDiagnostics";
 import { fmtMem, fmtUptime, fmtStartDate } from "../utils/format";
 
 function fmtGib(gib: number): string {
@@ -101,6 +102,7 @@ export type SidebarItem =
   | PodPortItem
   | InfoItem
   | OpenMonitorItem
+  | K8sWarningItem
   | ErrorItem;
 
 export class SystemItem extends vscode.TreeItem {
@@ -708,6 +710,26 @@ export class OpenMonitorItem extends vscode.TreeItem {
     super("Open Full GPU Monitor", vscode.TreeItemCollapsibleState.None);
     this.iconPath = new vscode.ThemeIcon("window");
     this.command = { command: "gpuMonitor.show", title: "Open GPU Monitor" };
+  }
+}
+
+/**
+ * Explains why the Pod Manager is empty. Only rendered when this machine actually has a
+ * Kubernetes footprint (kubectl / kubeconfig / in-cluster token) — Docker-only users
+ * never see it. Clicking opens the full diagnostics report; the inline × hides it for good.
+ */
+export class K8sWarningItem extends vscode.TreeItem {
+  constructor(public readonly status: K8sStatus) {
+    super(`Kubernetes: ${describeStatus(status).message}`, vscode.TreeItemCollapsibleState.None);
+    this.id = "k8sWarning";
+    this.description = "click for details";
+    this.iconPath = new vscode.ThemeIcon("warning", new vscode.ThemeColor("editorWarning.foreground"));
+    this.contextValue = "k8sWarning";
+    const d = describeStatus(status);
+    this.tooltip = new vscode.MarkdownString(
+      [`**Kubernetes pods are not being shown**`, "", `_${d.message}_`, "", d.hint, "", "Click for full diagnostics."].join("\n"),
+    );
+    this.command = { command: "gpuMonitor.k8sDiagnostics", title: "Kubernetes Diagnostics" };
   }
 }
 

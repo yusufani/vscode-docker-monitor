@@ -1,8 +1,9 @@
 import { readdirSync } from "fs";
 import * as os from "os";
 import { IContainerCollector, PodIndex } from "./interfaces";
-import { ContainerStats, ContainerFullInfo, ContainerInspect } from "../types";
-import { findBinary, execCommand } from "../utils/exec";
+import { ContainerStats, ContainerFullInfo, ContainerInspect, K8sFootprint, K8sState, K8sStatus } from "../types";
+import { probeFootprint } from "./kubernetesDiagnostics";
+import { execCommand } from "../utils/exec";
 import { fmtUptime } from "../utils/format";
 import { log, logDebug } from "../utils/logger";
 
@@ -13,6 +14,8 @@ const AVAIL_CACHE_TTL = 60_000; // cluster reachability probe cached 60s
 const KUBEPODS_CGROUP = "/sys/fs/cgroup/kubepods.slice";
 
 export interface KubernetesOptions {
+  /** Master switch (dockerMonitor.kubernetes.enabled). When false the collector reports "disabled". */
+  enabled: boolean;
   /** "node" (default) shows only pods with a container on this host; "cluster" shows all pods. */
   scope: "node" | "cluster";
   /** Namespace allow-list. Empty = all namespaces. */
@@ -44,6 +47,13 @@ function parseMemToMib(s: string): number {
   if (s.endsWith("G")) return (parseFloat(s) || 0) * 1000 * 1000 * 1000 / (1024 * 1024);
   const n = parseFloat(s);
   return isNaN(n) ? 0 : n / (1024 * 1024);
+}
+
+/** Best-effort one-line error text (exec errors carry stderr worth showing in diagnostics). */
+function errText(e: unknown): string {
+  const err = e as { stderr?: string; message?: string };
+  const s = (err?.stderr || err?.message || String(e)).trim();
+  return s.length > 800 ? s.slice(0, 800) + "…" : s;
 }
 
 /** Strip the trailing ReplicaSet hash to get the owning Deployment name (foo-5595474b89 -> foo). */
@@ -92,18 +102,48 @@ export class KubernetesCollector implements IContainerCollector {
   // (typical when the extension host itself runs inside a container).
   private warnedNodeScopeUnavailable = false;
 
+  // Why pods are (or are not) visible — consumed by the sidebar warning row.
+  private state: K8sState = "disabled";
+  private detail = "";
+  private footprint: K8sFootprint = { kubectlPath: null, kubeconfig: null, inCluster: false, any: false };
+
   constructor(private readonly opts: KubernetesOptions) {}
 
   private get kubectl(): string {
     return this.opts.kubectlBinary || this.kubectlPath || "kubectl";
   }
 
+  /** Current health, safe to call on every refresh (served from the probe cache). */
+  getStatus(): K8sStatus {
+    return {
+      state: this.state,
+      detail: this.detail || undefined,
+      scope: this.opts.scope,
+      namespaces: this.opts.namespaces,
+      footprint: this.footprint,
+    };
+  }
+
   async isAvailable(): Promise<boolean> {
     if (this.available !== null && Date.now() - this.lastAvailTime < AVAIL_CACHE_TTL) {
       return this.available;
     }
-    this.kubectlPath = this.opts.kubectlBinary || (await findBinary("kubectl"));
+    // Refreshed alongside the reachability probe so the diagnostics report always
+    // reflects the environment as the extension host actually sees it.
+    this.footprint = await probeFootprint();
+
+    if (!this.opts.enabled) {
+      this.state = "disabled";
+      this.detail = "";
+      this.available = false;
+      this.lastAvailTime = Date.now();
+      return false;
+    }
+
+    this.kubectlPath = this.opts.kubectlBinary || this.footprint.kubectlPath;
     if (!this.kubectlPath) {
+      this.state = "no-kubectl";
+      this.detail = "";
       this.available = false;
       this.lastAvailTime = Date.now();
       return false;
@@ -113,8 +153,14 @@ export class KubernetesCollector implements IContainerCollector {
     try {
       await execCommand(`${this.kubectl} cluster-info --request-timeout=4s`, { timeout: 6000 });
       this.available = true;
+      if (this.state === "no-kubectl" || this.state === "unreachable" || this.state === "disabled") {
+        this.state = "ok"; // refined by getAllRunningContainers()
+        this.detail = "";
+      }
     } catch (e) {
       logDebug(`[k8s] cluster unreachable: ${e}`);
+      this.state = "unreachable";
+      this.detail = errText(e);
       this.available = false;
     }
     this.lastAvailTime = Date.now();
@@ -141,8 +187,8 @@ export class KubernetesCollector implements IContainerCollector {
     const walk = (entries: string[], dir: string, depth: number) => {
       if (depth > 4) return;
       for (const name of entries) {
-        let m = name.match(/^cri-containerd-([0-9a-f]{64})\.scope$/);
-        if (!m) m = name.match(/^crio-([0-9a-f]{64})\.scope$/);
+        // containerd, CRI-O and Docker each name the container scope differently.
+        const m = name.match(/^(?:cri-containerd|crio|docker)-([0-9a-f]{64})\.scope$/);
         if (m) {
           ids.add(m[1].substring(0, 12));
           continue;
@@ -196,11 +242,13 @@ export class KubernetesCollector implements IContainerCollector {
       const podIndex: PodIndex = new Map();
       const podMemLimit = new Map<string, number>();
       const nsFilter = this.opts.namespaces;
+      let matchedNamespaceFilter = 0; // pods left after the namespace filter, before node scoping
 
       for (const pod of parsed.items) {
         const ns = pod.metadata.namespace;
         const name = pod.metadata.name;
         if (nsFilter.length > 0 && !nsFilter.includes(ns)) continue;
+        matchedNamespaceFilter++;
 
         // Container short ids for this pod (from running container statuses)
         const shortIds: string[] = [];
@@ -279,9 +327,24 @@ export class KubernetesCollector implements IContainerCollector {
       this.podById = podById;
       this.podIndex = podIndex;
       this.podMemLimitMib = podMemLimit;
+
+      // Distinguish "nothing to show" from "everything got filtered out" — a silently
+      // empty Pod Manager is exactly the symptom the diagnostics row exists to explain.
+      if (results.length > 0) {
+        this.state = "ok";
+        this.detail = "";
+      } else if (matchedNamespaceFilter > 0) {
+        this.state = "node-scope-empty";
+        this.detail = `${matchedNamespaceFilter} pod(s) returned by the API server, 0 matched a container cgroup on this machine.`;
+      } else {
+        this.state = "no-pods";
+        this.detail = nsFilter.length > 0 ? `Namespace filter: ${nsFilter.join(", ")}` : "";
+      }
       return results;
     } catch (e) {
       log(`[k8s] getAllRunningContainers failed: ${e}`);
+      this.state = "list-failed";
+      this.detail = errText(e);
       return this.lastPodList; // serve stale on transient errors
     }
   }

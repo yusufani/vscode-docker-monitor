@@ -17,6 +17,11 @@ export interface Collectors {
   gpu: IGpuCollector;
   /** Aggregated container/pod source (Docker + Kubernetes). */
   docker: IContainerCollector;
+  /**
+   * The Kubernetes collector itself, kept even when it is unavailable so the UI can
+   * ask it *why* pods are missing instead of silently showing nothing.
+   */
+  k8s: KubernetesCollector;
 }
 
 export async function createCollectors(): Promise<Collectors> {
@@ -62,17 +67,26 @@ export async function createCollectors(): Promise<Collectors> {
     log("Container source: Docker");
   }
 
+  // Always constructed — when unavailable it still answers getStatus() so the sidebar
+  // can explain the reason (missing kubectl, unreachable cluster, over-tight scope…).
+  const k8s = new KubernetesCollector({
+    enabled: cfg.get<boolean>("kubernetes.enabled", true),
+    scope: cfg.get<"node" | "cluster">("kubernetes.scope", "node"),
+    namespaces: cfg.get<string[]>("kubernetes.namespaces", []),
+    kubectlBinary: cfg.get<string>("kubectlBinary", ""),
+  });
   if (cfg.get<boolean>("kubernetes.enabled", true)) {
-    const k8s = new KubernetesCollector({
-      scope: cfg.get<"node" | "cluster">("kubernetes.scope", "node"),
-      namespaces: cfg.get<string[]>("kubernetes.namespaces", []),
-      kubectlBinary: cfg.get<string>("kubectlBinary", ""),
-    });
+    // Registered even if the first probe fails: every call re-checks isAvailable()
+    // (60s cache) and returns empty until the cluster becomes reachable, so a kubeconfig
+    // added after startup starts working without reloading the window.
+    sources.push(k8s);
     try {
-      if (await k8s.isAvailable()) {
-        sources.push(k8s);
-        log(`Container source: Kubernetes (scope=${cfg.get("kubernetes.scope", "node")})`);
-      }
+      const up = await k8s.isAvailable();
+      log(
+        up
+          ? `Container source: Kubernetes (scope=${cfg.get("kubernetes.scope", "node")})`
+          : `Kubernetes registered but not reachable yet: ${k8s.getStatus().state}`,
+      );
     } catch (e) {
       log(`Kubernetes probe failed: ${e}`);
     }
@@ -81,5 +95,5 @@ export async function createCollectors(): Promise<Collectors> {
   log(`Container sources active: ${sources.length}`);
   const containers = new ContainerAggregator(sources);
 
-  return { system, gpu, docker: containers };
+  return { system, gpu, docker: containers, k8s };
 }

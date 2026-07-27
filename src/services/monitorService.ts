@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import * as os from "os";
-import { SystemInfo, GpuData, ContainerFullInfo, ContainerInspect, MonitorData, DirUsage } from "../types";
+import { SystemInfo, GpuData, ContainerFullInfo, ContainerInspect, MonitorData, DirUsage, K8sStatus } from "../types";
 import { ISystemCollector, IGpuCollector, IContainerCollector } from "../collectors/interfaces";
 import { computeDiskUsers } from "../collectors/diskUsage";
 import { fmtMem } from "../utils/format";
@@ -37,6 +37,8 @@ export class MonitorService implements vscode.Disposable {
     private systemCollector: ISystemCollector,
     private gpuCollector: IGpuCollector,
     private dockerCollector: IContainerCollector,
+    /** Optional — supplies the Kubernetes health shown in the sidebar. */
+    private k8sCollector?: { getStatus(): K8sStatus },
   ) {
     this.gpuEnabled = vscode.workspace.getConfiguration("dockerMonitor").get<boolean>("gpuMonitoring", true);
   }
@@ -46,7 +48,13 @@ export class MonitorService implements vscode.Disposable {
       system: this.system,
       gpuData: this.gpuData,
       containers: this.containers,
+      k8s: this.k8sCollector?.getStatus(),
     };
+  }
+
+  /** Kubernetes health (undefined when no Kubernetes collector was wired in). */
+  getK8sStatus(): K8sStatus | undefined {
+    return this.k8sCollector?.getStatus();
   }
 
   getSystem(): SystemInfo {

@@ -53,6 +53,7 @@ DevPulse monitors **Kubernetes pods alongside Docker containers** — no separat
 - **Pod Manager sidebar section** — pods grouped by namespace. Expand a pod to see its ports and **start a `kubectl port-forward`** to open them in your browser.
 - **Pod actions** — Restart (`rollout restart` for managed workloads), Stop (`scale --replicas=0`), Force-delete, Logs, Exec, and Describe — right-click any pod.
 - **Node-scoped by default** — shows only pods running on this machine (so GPU/process attribution works); switch to cluster-wide with `dockerMonitor.kubernetes.scope`. Auto-disables when `kubectl` is missing or the cluster is unreachable.
+- **Tells you when pods are missing** — instead of silently showing nothing, the sidebar explains why (`kubectl` not on PATH, cluster unreachable, no permission to list pods, or everything filtered out by node scope) and links to a full diagnostics report. **Docker-only machines never see this** — it appears only where `kubectl`, a kubeconfig, or an in-cluster token exists. Turn it off with `dockerMonitor.kubernetes.showWarnings`.
 
 ### Smart Alerts (Opt-in)
 All notifications are **disabled by default**. Enable them with the **Alerts** toggle button in the container table toolbar. Once enabled, DevPulse watches for:
