@@ -344,8 +344,8 @@
       },
       {
         "command": "gpuMonitor.k8sDiagnostics",
-        "title": "DevPulse: Kubernetes Diagnostics",
-        "icon": "$(info)"
+        "title": "DevPulse: Check Kubernetes",
+        "icon": "$(symbol-namespace)"
       },
       {
         "command": "gpuMonitor.hideK8sWarning",
@@ -374,6 +374,14 @@
           "command": "gpuMonitor.support",
           "when": "view == gpuMonitor",
           "group": "navigation@99"
+        },
+        {
+          "command": "gpuMonitor.k8sDiagnostics",
+          "when": "view == gpuMonitor"
+        },
+        {
+          "command": "gpuMonitor.k8sDiagnostics",
+          "when": "view == dockerServices"
         }
       ],
       "view/item/context": [

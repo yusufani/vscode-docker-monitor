@@ -123,6 +123,7 @@ export function formatReport(s: K8sStatus): string {
     `  in-cluster token:  ${yes(f.inCluster)} (${SA_TOKEN})`,
     `  scope setting:     ${s.scope}`,
     `  namespace filter:  ${s.namespaces.length ? s.namespaces.join(", ") : "(all)"}`,
+    `  pods visible:      ${s.podCount}`,
     "",
   ];
 

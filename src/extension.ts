@@ -690,26 +690,68 @@ const K8S_TOAST_DISMISSED = "devpulse.k8sWarningDismissed";
 function registerK8sDiagnostics(context: vscode.ExtensionContext, monitor: MonitorService): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("gpuMonitor.k8sDiagnostics", async () => {
-      const status = monitor.getK8sStatus();
+      // Explicitly asked for, so this always answers — including on machines with no
+      // Kubernetes footprint at all, where the passive warning row stays hidden by design.
+      const status = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "DevPulse: checking Kubernetes…" },
+        () => monitor.checkK8s(),
+      );
       if (!status) {
         vscode.window.showInformationMessage("DevPulse: Kubernetes monitoring is not wired up in this session.");
         return;
       }
+
       const channel = getOutputChannel();
       channel.appendLine("");
       channel.appendLine(formatReport(status));
-      channel.show(true);
 
-      const hint = describeStatus(status).hint;
-      if (!shouldWarnAboutK8s(status)) return;
+      const showReport = (pick?: string) => {
+        if (pick === "Show Report") channel.show(true);
+      };
+      const d = describeStatus(status);
+
+      if (status.state === "ok") {
+        showReport(
+          await vscode.window.showInformationMessage(
+            `Kubernetes is working — ${status.podCount} pod${status.podCount === 1 ? "" : "s"} visible (scope: ${status.scope}).`,
+            "Show Report",
+          ),
+        );
+        return;
+      }
+      if (status.state === "no-pods") {
+        showReport(
+          await vscode.window.showInformationMessage(
+            "Kubernetes is reachable, but the cluster returned no pods.",
+            "Show Report",
+          ),
+        );
+        return;
+      }
+      if (status.state === "disabled") {
+        const pick = await vscode.window.showInformationMessage(
+          "DevPulse: Kubernetes monitoring is turned off.",
+          "Turn On",
+          "Show Report",
+        );
+        if (pick === "Turn On") {
+          await vscode.workspace
+            .getConfiguration("dockerMonitor")
+            .update("kubernetes.enabled", true, vscode.ConfigurationTarget.Global);
+          vscode.window.showInformationMessage("DevPulse: Kubernetes monitoring enabled — reload the window to apply.");
+        } else showReport(pick);
+        return;
+      }
+
       const pick = await vscode.window.showWarningMessage(
-        `Kubernetes: ${describeStatus(status).message}`,
-        { modal: false, detail: hint },
+        `Kubernetes: ${d.message}`,
+        { modal: false, detail: d.hint },
+        "Show Report",
         "Open Settings",
       );
       if (pick === "Open Settings") {
         await vscode.commands.executeCommand("workbench.action.openSettings", "dockerMonitor.kubernetes");
-      }
+      } else showReport(pick);
     }),
   );
 

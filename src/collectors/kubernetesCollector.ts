@@ -3,7 +3,7 @@ import * as os from "os";
 import { IContainerCollector, PodIndex } from "./interfaces";
 import { ContainerStats, ContainerFullInfo, ContainerInspect, K8sFootprint, K8sState, K8sStatus } from "../types";
 import { probeFootprint } from "./kubernetesDiagnostics";
-import { execCommand } from "../utils/exec";
+import { clearBinaryCache, execCommand } from "../utils/exec";
 import { fmtUptime } from "../utils/format";
 import { log, logDebug } from "../utils/logger";
 
@@ -120,8 +120,25 @@ export class KubernetesCollector implements IContainerCollector {
       detail: this.detail || undefined,
       scope: this.opts.scope,
       namespaces: this.opts.namespaces,
+      podCount: this.lastPodList.length,
       footprint: this.footprint,
     };
+  }
+
+  /**
+   * Re-probe from scratch and report the outcome. Backs the manual "Check Kubernetes"
+   * command, where the user has usually just installed kubectl or fixed a kubeconfig and
+   * expects an answer about *now* — so every cache, including the `which kubectl` lookup,
+   * is dropped first.
+   */
+  async refreshStatus(): Promise<K8sStatus> {
+    clearBinaryCache();
+    this.available = null;
+    this.lastAvailTime = 0;
+    this.lastPodList = [];
+    this.lastPodListTime = 0;
+    if (await this.isAvailable()) await this.getAllRunningContainers();
+    return this.getStatus();
   }
 
   async isAvailable(): Promise<boolean> {

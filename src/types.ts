@@ -155,6 +155,8 @@ export interface K8sStatus {
   scope: "node" | "cluster";
   /** Effective namespace allow-list at the time of the probe. */
   namespaces: string[];
+  /** Pods visible after scope + namespace filtering, as of the last list. */
+  podCount: number;
   footprint: K8sFootprint;
 }
 
