@@ -54,6 +54,7 @@ DevPulse monitors **Kubernetes pods alongside Docker containers** — no separat
 - **Pod actions** — Restart (`rollout restart` for managed workloads), Stop (`scale --replicas=0`), Force-delete, Logs, Exec, and Describe — right-click any pod.
 - **Node-scoped by default** — shows only pods running on this machine (so GPU/process attribution works); switch to cluster-wide with `dockerMonitor.kubernetes.scope`. Auto-disables when `kubectl` is missing or the cluster is unreachable.
 - **Tells you when pods are missing** — instead of silently showing nothing, the sidebar explains why (`kubectl` not on PATH, cluster unreachable, no permission to list pods, or everything filtered out by node scope) and links to a full diagnostics report. **Docker-only machines never see this** — it appears only where `kubectl`, a kubeconfig, or an in-cluster token exists. Turn it off with `dockerMonitor.kubernetes.showWarnings`.
+- **Check Kubernetes on demand** — the panel's `...` menu (and the Command Palette) has **DevPulse: Check Kubernetes**, which re-probes from scratch and tells you where you stand: `Kubernetes is working — 36 pods visible`, or `kubectl not found on PATH` with what to do about it. It answers even on machines with no Kubernetes at all, which is where the passive warning deliberately stays quiet.
 
 ### Smart Alerts (Opt-in)
 All notifications are **disabled by default**. Enable them with the **Alerts** toggle button in the container table toolbar. Once enabled, DevPulse watches for:

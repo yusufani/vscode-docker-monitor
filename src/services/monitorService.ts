@@ -38,7 +38,7 @@ export class MonitorService implements vscode.Disposable {
     private gpuCollector: IGpuCollector,
     private dockerCollector: IContainerCollector,
     /** Optional — supplies the Kubernetes health shown in the sidebar. */
-    private k8sCollector?: { getStatus(): K8sStatus },
+    private k8sCollector?: { getStatus(): K8sStatus; refreshStatus(): Promise<K8sStatus> },
   ) {
     this.gpuEnabled = vscode.workspace.getConfiguration("dockerMonitor").get<boolean>("gpuMonitoring", true);
   }
@@ -55,6 +55,17 @@ export class MonitorService implements vscode.Disposable {
   /** Kubernetes health (undefined when no Kubernetes collector was wired in). */
   getK8sStatus(): K8sStatus | undefined {
     return this.k8sCollector?.getStatus();
+  }
+
+  /**
+   * Re-probe Kubernetes from scratch and push the result to the views. Backs the manual
+   * "Check Kubernetes" command — unlike getK8sStatus() this never serves a cached verdict.
+   */
+  async checkK8s(): Promise<K8sStatus | undefined> {
+    if (!this.k8sCollector) return undefined;
+    const status = await this.k8sCollector.refreshStatus();
+    await this.refresh(); // repopulate pods / clear the warning row without waiting a cycle
+    return status;
   }
 
   getSystem(): SystemInfo {
