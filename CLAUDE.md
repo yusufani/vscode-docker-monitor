@@ -4,9 +4,16 @@ VS Code extension for real-time GPU, CPU, RAM, and Docker container monitoring.
 
 ## Build & Test Workflow
 
-**Easiest:** run `./scripts/deploy.sh` — it auto-bumps the patch version (so the build
-is always higher than what's installed), compiles, packages, removes any older installed
-copies, and installs onto the running Stable server. Then reload the window.
+**Easiest:** run `./scripts/deploy.sh` — it compiles, packages, **uninstalls** whatever
+is installed, and installs the fresh build onto the running Stable server. Then restart
+the extension host.
+
+**Do NOT bump the version to deploy.** The script deploys the version already in
+`package.json` and never touches it, so the working tree stays in sync with git and
+release-please stays the only thing that moves the version number. (It used to
+auto-bump on every run; those bumps were never committed, so the installed copy drifted
+to 1.21.x while git said 1.17.0 — and VS Code then rejected every new build as "older
+than what is installed". Uninstall-then-install removes the need for a bump entirely.)
 
 Manual steps (if you need finer control):
 
@@ -34,7 +41,13 @@ hardcoded one-liner below can go stale. Prefer `./scripts/deploy.sh`, which dete
 
 **Important — which server is actually running:** The user runs the **Stable** server at `vscode-server-fix/.vscode-server`, launched with `VSCODE_AGENT_FOLDER` pointing there. The `code-server` CLI defaults its extensions dir to `~/.vscode-server/extensions` (empty / root-owned here), so you MUST pass `VSCODE_AGENT_FOLDER=.../vscode-server-fix/.vscode-server` or the install fails with "Unable to resolve nonexistent file '.../.vscode-server/extensions'". The old Insiders path (`.vscode-server-insiders/.../code-server-insiders`) installs to a server that is NOT running — extensions land there but the user never sees them. To find the live server + folder: `pgrep -af extensionHost` and read its `/proc/<pid>/environ` for `VSCODE_AGENT_FOLDER`.
 
-**Important:** There is already an installed version. Always bump `version` in `package.json` higher than the current installed version, otherwise the old version will be used.
+**Important — reinstalling the same version:** VS Code keeps the highest installed version
+and treats installing an equal one as a no-op, so a plain `--install-extension` appears to
+succeed while the old code keeps running. Always `--uninstall-extension anisoft.devpulse-monitor`
+first (this is what `deploy.sh` does); bumping the version to work around it is what caused
+the git-vs-installed drift described above. Verify with
+`code-server --list-extensions --show-versions` — there must be exactly one copy, matching
+`package.json`, and the sidebar's version footer must show the same number.
 
 ## One-liner (compile + package + install)
 
