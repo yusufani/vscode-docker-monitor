@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { execCommand } from "./exec";
+import { execCommand, execCommandWithInput } from "./exec";
 import { log, logDebug } from "./logger";
 
 /**
@@ -13,6 +13,15 @@ import { log, logDebug } from "./logger";
  * we can recover full attribution by launching a short-lived helper container that
  * bind-mounts the host's /proc (and /etc/passwd) read-only and dumps the few files
  * we need for a batch of pids. One `docker run` per refresh, cached for 25s.
+ *
+ * This reads other host users' command lines and working directories, so it is gated
+ * behind explicit consent (`dockerMonitor.hostProcHelper.mode`, default "ask"). The
+ * caller degrades to `docker top` attribution when consent is absent — nothing breaks,
+ * it just resolves fewer processes.
+ *
+ * The gate that decides whether this path runs at all lives in nvidiaCollector: it
+ * probes whether host pids are readable via /proc directly. On a host, or in a
+ * container with /proc bind-mounted, this module is never reached.
  */
 
 export interface HostProcDetail {
@@ -31,6 +40,9 @@ export interface HostProcDetail {
 
 const CACHE_TTL = 25_000; // matches the docker stats / pid-map cache cadence
 const CLK_TCK = 100; // Linux default; helper images don't expose getconf reliably
+const RUN_TIMEOUT = 30_000; // a loaded host can take well over 15s to start a container
+const NAME_PREFIX = "devpulse-hostproc-";
+const CONSENT_KEY = "devpulse.hostProcHelper.consent";
 
 let _cache: Map<number, HostProcDetail> | null = null;
 let _cacheKey = "";
@@ -38,6 +50,97 @@ let _cacheTime = 0;
 
 // Resolved helper image, cached for the session ("" = not yet resolved, null = none found)
 let _helperImage: string | null | undefined = undefined;
+
+// Monotonic suffix so concurrent refreshes never collide on a container name.
+let _runSeq = 0;
+
+// ── Consent ────────────────────────────────────────────────────────────────────
+
+let _globalState: vscode.Memento | undefined;
+let _promptOpen = false;
+let _deferredThisSession = false;
+
+/** Wire up persisted consent + sweep any containers a previous session stranded. */
+export function initHostProcHelper(context: vscode.ExtensionContext): void {
+  _globalState = context.globalState;
+}
+
+/**
+ * Remove helper containers left behind by an earlier session.
+ *
+ * `docker run --rm` only auto-removes once the container has *exited*. If the CLI is
+ * killed between the create and start calls (our own timeout used to do exactly this),
+ * the container is stranded in "created" forever. Named containers make those findable.
+ */
+export async function sweepHostProcLeftovers(docker: string): Promise<void> {
+  try {
+    const { stdout } = await execCommand(`${docker} ps -aq --filter name=${NAME_PREFIX}`, {
+      timeout: 10_000,
+    });
+    const ids = stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (ids.length === 0) return;
+    await execCommand(`${docker} rm -f ${ids.join(" ")}`, { timeout: 30_000 });
+    log(`[hostproc] removed ${ids.length} leftover helper container(s)`);
+  } catch (e) {
+    logDebug(`[hostproc] leftover sweep failed: ${e}`);
+  }
+}
+
+type ConsentMode = "ask" | "always" | "never";
+
+function consentMode(): ConsentMode {
+  return vscode.workspace
+    .getConfiguration("dockerMonitor")
+    .get<ConsentMode>("hostProcHelper.mode", "ask");
+}
+
+/**
+ * Decide whether we may run the helper right now.
+ *
+ * Never blocks: when consent has not been given yet it fires the prompt and reports
+ * `false` for this refresh, so the caller falls back to `docker top` immediately. Once
+ * the user allows it, the next refresh (≤30s later) picks it up.
+ */
+function mayRunHelper(image: string): boolean {
+  const mode = consentMode();
+  if (mode === "never") return false;
+  if (mode === "always") return true;
+
+  if (_globalState?.get<string>(CONSENT_KEY) === "granted") return true;
+  if (_promptOpen || _deferredThisSession) return false;
+
+  _promptOpen = true;
+  void promptForConsent(image).finally(() => {
+    _promptOpen = false;
+  });
+  return false;
+}
+
+async function promptForConsent(image: string): Promise<void> {
+  const choice = await vscode.window.showWarningMessage(
+    "DevPulse can resolve the owner of GPU processes by starting a short-lived helper " +
+      `container (${image}) that mounts the host's /proc and /etc/passwd read-only. ` +
+      "This exposes the command lines and working directories of other users' processes " +
+      "on this machine. Without it, attribution falls back to `docker top` and resolves fewer processes.",
+    { modal: false },
+    "Allow",
+    "Not now",
+    "Never",
+  );
+
+  if (choice === "Allow") {
+    await _globalState?.update(CONSENT_KEY, "granted");
+    log("[hostproc] host /proc helper allowed by the user");
+  } else if (choice === "Never") {
+    await vscode.workspace
+      .getConfiguration("dockerMonitor")
+      .update("hostProcHelper.mode", "never", vscode.ConfigurationTarget.Global);
+    log("[hostproc] host /proc helper disabled by the user");
+  } else {
+    // "Not now" or dismissed — stay quiet until the window is reloaded.
+    _deferredThisSession = true;
+  }
+}
 
 /** Pick a local image that can run busybox/POSIX `sh`. Prefers alpine/busybox-based. */
 async function resolveHelperImage(docker: string): Promise<string | null> {
@@ -60,9 +163,10 @@ async function resolveHelperImage(docker: string): Promise<string | null> {
       .split("\n")
       .map((s) => s.trim())
       .filter((s) => s && !s.startsWith("<none>"));
-    // Prefer the smallest, most-likely-to-have-busybox images first.
-    const preferred = images.find((i) => /alpine|busybox/i.test(i));
-    _helperImage = preferred || images[0] || null;
+    // Only images we can be confident ship a POSIX `sh`. Falling back to "whatever
+    // is first in the list" used to pull in arbitrary application images — slow to
+    // start, often missing `sh`, and a surprising thing to hand the host's /proc to.
+    _helperImage = images.find((i) => /alpine|busybox/i.test(i)) || null;
   } catch (e) {
     logDebug(`[hostproc] could not list docker images: ${e}`);
     _helperImage = null;
@@ -123,15 +227,21 @@ export async function readHostProcViaDocker(
 
   const image = await resolveHelperImage(docker);
   if (!image) return new Map();
+  if (!mayRunHelper(image)) return new Map();
 
   const map = new Map<number, HostProcDetail>();
+  // Named so a stranded container is findable and removable — see sweepHostProcLeftovers.
+  const name = `${NAME_PREFIX}${process.pid}-${_runSeq++}`;
   try {
-    const scriptB64 = Buffer.from(buildScript(pids), "utf-8").toString("base64");
+    // The script goes in over stdin (`sh -s`) rather than the command line: no quoting
+    // problems, and nothing that reads like an obfuscated payload in the process table.
     const cmd =
-      `${docker} run --rm --entrypoint sh ` +
+      `${docker} run --rm -i --name ${name} --entrypoint sh ` +
       `-v /proc:/hostproc:ro -v /etc/passwd:/hostpasswd:ro ` +
-      `${image} -c 'echo ${scriptB64} | base64 -d | sh'`;
-    const { stdout } = await execCommand(cmd, { timeout: 15000 });
+      `${image} -s`;
+    const { stdout } = await execCommandWithInput(cmd, buildScript(pids), {
+      timeout: RUN_TIMEOUT,
+    });
 
     // Collect raw records first; startTime needs btime which arrives on the last line.
     interface Raw { pid: number; cgroup: string; uid: number; username: string; rssMib: number; cmdline: string; cwd: string; stat: string; parentCmdline: string; }
@@ -173,6 +283,9 @@ export async function readHostProcViaDocker(
     }
   } catch (e) {
     logDebug(`[hostproc] helper run failed (image=${image}): ${e}`);
+    // A timeout kills the docker CLI, which may have created the container without
+    // ever starting it — `--rm` never fires for those. Clean up explicitly.
+    await execCommand(`${docker} rm -f ${name}`, { timeout: 10_000 }).catch(() => undefined);
     return new Map();
   }
 

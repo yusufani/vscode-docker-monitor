@@ -79,6 +79,21 @@
           "default": "",
           "description": "Custom path to kubectl binary (auto-detected if empty)"
         },
+        "dockerMonitor.hostProcHelper.mode": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "always",
+            "never"
+          ],
+          "enumDescriptions": [
+            "Ask once, then remember the answer for this machine",
+            "Always allow the helper container without asking",
+            "Never run the helper; attribution falls back to `docker top`"
+          ],
+          "default": "ask",
+          "markdownDescription": "Controls the host `/proc` helper container that DevPulse uses **only when it runs inside a container** and host pids are otherwise unreadable. The helper bind-mounts the host's `/proc` and `/etc/passwd` read-only, which exposes the command lines and working directories of other users' processes on that machine. Declining is safe: attribution degrades to `docker top` (docker containers only — no Kubernetes pods or host processes)."
+        },
         "dockerMonitor.hostProcHelperImage": {
           "type": "string",
           "default": "",
