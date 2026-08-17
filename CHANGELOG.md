@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.20.0](https://github.com/yusufani/devpulse-monitor/compare/v1.19.0...v1.20.0) (2026-08-17)
+
+
+### Features
+
+* gate the host /proc helper behind consent, stop leaking containers ([2bb8f8a](https://github.com/yusufani/devpulse-monitor/commit/2bb8f8a2c4c42c62020c1b91667a247dda75d032))
+* gate the host /proc helper behind consent, stop leaking containers ([2b518f8](https://github.com/yusufani/devpulse-monitor/commit/2b518f8a7dac5161ef6f583c2ad4720a7a9b7c68))
+
 ## [1.19.0](https://github.com/yusufani/devpulse-monitor/compare/v1.18.0...v1.19.0) (2026-07-27)
 
 
