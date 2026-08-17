@@ -7,15 +7,22 @@ import { ContainerTableViewProvider } from "./views/containerTableView";
 import { GpuMonitorPanel } from "./views/webview/gpuMonitorPanel";
 import { ProcessItem, ProcessDetailItem, ContainerItem, RamProcessItem, CpuProcessItem, RamManagerItem, CpuManagerItem, DiskManagerItem } from "./views/treeItems";
 import { fmtMem, fmtUptime, fmtStartDate } from "./utils/format";
-import { execCommand } from "./utils/exec";
+import { execCommand, findBinary } from "./utils/exec";
 import { describeStatus, formatReport, shouldWarnAboutK8s } from "./collectors/kubernetesDiagnostics";
 import { getOutputChannel, log } from "./utils/logger";
+import { initHostProcHelper, sweepHostProcLeftovers } from "./utils/hostProcHelper";
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const outputChannel = getOutputChannel();
   context.subscriptions.push(outputChannel);
   log("Extension activating...");
   log(`platform = ${process.platform}, cwd = ${process.cwd()}`);
+
+  // ── Host /proc helper: persisted consent + clean up stranded containers ───────
+  initHostProcHelper(context);
+  void findBinary("docker").then((docker) => {
+    if (docker) return sweepHostProcLeftovers(docker);
+  });
 
   // ── Create collectors (platform-aware) ────────────────────────
   const collectors = await createCollectors();
